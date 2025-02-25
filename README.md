@@ -44,3 +44,9 @@ python3 main.py --config configs/test_cfg/VTNGCN_autsl_to_vn_sign.yaml
 ```
 python3 main.py --config configs//test_cfgVTN3GCN_finetune_from_one_view.yaml
 ```
+### Folders usage
+- AAGCN: AGCN architecture
+- dataset: contains dataloader for models
+- modeling: contains architecture models: I3D, Swin Video Transformer, Video Transformer, MViTv2, VTNGCN, VTN3GCN and 3-view variants of them.
+- tools: Hand Crop and Pose Flow preparation codes for VTN, VTNGCN and VTN3GCN
+- trainer: contains code for training and testing
