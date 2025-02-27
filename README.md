@@ -8,8 +8,8 @@ Most existing SLR datasets provide only frontal viewpoints, which constrains the
 
 ## Data
 Multi-VSL dataset was collected in collaboration with 28 volunteers, including both teachers and hearing-impaired students from Hanoi School for the Deaf. The dataset comprises 18,981 videos, each video captures a volunteer performing a single gloss from one of three distinct viewpoints: left (~45°), center (~0°), and right (~45°), to ensure high representativeness.
-Link Dataset: [Link](https://drive.google.com/drive/folders/1yUU1m2hy_CjaXDDoR_6i9Y3T1XL2pD4C)
-Data labels in folder [data]
+- Link Dataset: [Link](https://drive.google.com/drive/folders/1yUU1m2hy_CjaXDDoR_6i9Y3T1XL2pD4C)
+- Data labels in folder [data](https://github.com/fossbk/MultiView-ISLR/tree/main/VTN3GCN/data)
 
 ## SOTA comparision
  Method               | Top-1 Accuracy (%) | Improve | Top-5 Accuracy (%) | Improve |
