@@ -25,7 +25,6 @@ Multi-VSL dataset was collected in collaboration with 28 volunteers, including b
 | VTN3GCN [ckpt](https://drive.google.com/drive/folders/12dScaCjePvTyxvlWElGVTYv12UFcHN9U?usp=drive_link)      | 92.92 ± 0.0009      | -       | 98.25 ± 0.0011      | -       |
 
 ## Usage
-### Data
 ### Package
 Packages could be installed by:
 ```
