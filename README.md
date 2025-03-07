@@ -22,7 +22,7 @@ Multi-VSL dataset was collected in collaboration with 28 volunteers, including b
 | MViTv2 (3-view)     | 86.45 ± 0.0026      | 6.47    | 95.55 ± 0.0031      | 2.70    |
 | VTN (1-view)        | 81.64 ± 0.0052      | 11.28   | 92.29 ± 0.0037      | 5.96    |
 | VTN (3-view)        | 87.99 ± 0.0051      | 4.93    | 95.50 ± 0.0017      | 2.75    |
-| VTN3GCN [ckpt](https://drive.google.com/drive/folders/12dScaCjePvTyxvlWElGVTYv12UFcHN9U?usp=drive_link)      | 92.92 ± 0.0009      | -       | 98.25 ± 0.0011      | -       |
+| VTN3GCN [checkpoint](https://drive.google.com/drive/folders/12dScaCjePvTyxvlWElGVTYv12UFcHN9U?usp=drive_link)      | 92.92 ± 0.0009      | -       | 98.25 ± 0.0011      | -       |
 
 ## Usage
 ### Package
