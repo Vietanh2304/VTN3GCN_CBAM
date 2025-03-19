@@ -31,19 +31,11 @@ Packages could be installed by:
 pip install -r requirements.txt
 ```
 ### Training
-- VTNGCN:
-```
-python3 main.py --config configs/VTNGCN_autsl_to_vn_sign.yaml
-```
 - VTN3GCN:
 ```
 python3 main.py --config configs/VTN3GCN_finetune_from_one_view.yaml
 ```
 ### Testing
-- VTNGCN:
-```
-python3 main.py --config configs/test_cfg/VTNGCN_autsl_to_vn_sign.yaml
-```
 - VTN3GCN:
 ```
 python3 main.py --config configs//test_cfgVTN3GCN_finetune_from_one_view.yaml
@@ -54,7 +46,7 @@ python3 main.py --config configs//test_cfgVTN3GCN_finetune_from_one_view.yaml
 - data: labels folder
 - dataset: contains dataloader for models
 - images: model firgure
-- modeling: contains architecture models: I3D, Swin Video Transformer, Video Transformer, MViTv2, VTNGCN, VTN3GCN and 3-view variants of them.
-- tools: Hand Crop and Pose Flow preparation codes for VTN, VTNGCN and VTN3GCN
+- modeling: contains architecture models: I3D, Swin Video Transformer, Video Transformer, MViTv2, VTN3GCN and 3-view variants of them.
+- tools: Hand Crop and Pose Flow preparation codes for VTN and VTN3GCN
 - trainer: contains code for training and testing
 - utils: augmentation and config reader
