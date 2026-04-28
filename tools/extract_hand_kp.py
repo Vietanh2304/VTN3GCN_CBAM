@@ -48,5 +48,5 @@ def extract_hand_keypoints(base_dir):
                 continue
 
 if __name__ == '__main__':
-    base_url = "/home/ibmelab/Documents/GG/VSLRecognition/CTRGCN -UC/Ubuntu/mnt/sda1/VSLR_Storage/MM-WLAuslan"
+    base_url = "/mnt/sda1/VSLR_Storage/MM-WLAuslan"
     extract_hand_keypoints(base_url)
