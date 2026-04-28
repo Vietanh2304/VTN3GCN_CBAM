@@ -2,6 +2,7 @@ import torch
 from torch import nn
 
 from .vtn_utils import FeatureExtractor, FeatureExtractorGCN, LinearClassifier, SelfAttention, CrossAttention
+from .cbam_modules import CSMAC, IVHF
 import torch.nn.functional as F
 from pytorch_lightning.utilities.migration import pl_legacy_patch
 
@@ -18,137 +19,137 @@ class MMTensorNorm(nn.Module):
 
 
 class VTNHCPF(nn.Module):
-    def __init__(self, num_classes=199, num_heads=4, num_layers=2, embed_size=512, sequence_length=16, cnn='rn34',
-                 freeze_layers=0, dropout=0, **kwargs):
+    def __init__(self, num_classes=199, num_heads=4, num_layers=2, embed_size=512,
+                 sequence_length=16, cnn='rn34', freeze_layers=0, dropout=0,
+                 use_cbam_t1=True, use_cbam_t2=True, **kwargs):
         super().__init__()
         print("Model: VTNHCPF")
         self.sequence_length = sequence_length
         self.embed_size = embed_size
         self.num_classes = num_classes
-        self.num_attn_features  = embed_size
-        self.num_classes = num_classes
+        self.num_attn_features = embed_size * 2     # = 1024 cho HANDCROP
+        self.use_cbam_t2 = use_cbam_t2
 
-        self.feature_extractor = FeatureExtractor(cnn, embed_size, freeze_layers)
+        self.feature_extractor = FeatureExtractor(cnn, embed_size, freeze_layers,
+                                                  use_cbam=use_cbam_t1)
         self.norm = MMTensorNorm(-1)
         self.bottle_mm = nn.Linear(106 + self.num_attn_features, self.num_attn_features)
 
-        self.self_attention_decoder = SelfAttention(self.num_attn_features, self.num_attn_features,
-                                                    [num_heads] * num_layers,
-                                                    self.sequence_length, layer_norm=True,dropout = dropout)
+        # CS-MAC tầng 2 cho 2-stream [RGB=1024, PF=106]
+        if use_cbam_t2:
+            self.csmac = CSMAC(stream_dims=[self.num_attn_features, 106],
+                               common_dim=256, num_heads=4)
+
+        self.self_attention_decoder = SelfAttention(
+            self.num_attn_features, self.num_attn_features,
+            [num_heads] * num_layers,
+            self.sequence_length, layer_norm=True, dropout=dropout
+        )
         self.classifier = LinearClassifier(self.num_attn_features, self.num_classes, dropout)
         self.dropout = dropout
         self.relu = F.relu
 
-    def reset_head(self,num_classes):
+    def reset_head(self, num_classes):
         self.classifier = LinearClassifier(self.num_attn_features, num_classes, self.dropout)
-        print("Reset to ",num_classes)
+        print("Reset to ", num_classes)
 
-    def forward_features(self, features = None,poseflow = None):
+    def forward_features(self, features=None, poseflow=None):
+        zp = torch.cat((features, poseflow), dim=-1)         # (B, T, 1024+106=1130)
 
-        # Reshape to put both hand crops on the same axis.
-       
-        zp = torch.cat((features, poseflow), dim=-1)
+        if self.use_cbam_t2:
+            zp = self.csmac(zp)                              # CS-MAC tầng 2
 
         zp = self.norm(zp)
         zp = self.relu(self.bottle_mm(zp))
-
         zp = self.self_attention_decoder(zp)
-
         return zp
 
-    def forward(self, clip = None,poseflow = None,**kwargs):
-        """Extract the image feature vectors."""
-        rgb_clip, pose_clip = clip,poseflow
-
-        # Reshape to put both hand crops on the same axis.
+    def forward(self, clip=None, poseflow=None, **kwargs):
+        rgb_clip, pose_clip = clip, poseflow
         b, t, x, c, h, w = rgb_clip.size()
         rgb_clip = rgb_clip.view(b, t * x, c, h, w)
         z = self.feature_extractor(rgb_clip)
-        # Reshape back to extract features of both wrist crops as one feature vector.
-        z = z.view(b, t, -1)
+        z = z.view(b, t, -1)                                  # (B, T, 1024)
 
-        zp = torch.cat((z, pose_clip), dim=-1)
-
-        zp = self.norm(zp)
-        zp = self.relu(self.bottle_mm(zp))
-
-        zp = self.self_attention_decoder(zp)
+        zp = self.forward_features(z, pose_clip)
         y = self.classifier(zp)
-
-        return {'logits':y.mean(1)} # train
-        # return y.mean(1) # convert to script
+        return {'logits': y.mean(1)}
 
 
 class VTNHCPF_GCN(nn.Module):
-    def __init__(self, num_classes=199, num_heads=4, num_layers=2, embed_size=512, sequence_length=16, cnn='rn34',
-                 gcn='AAGCN', freeze_layers=0, dropout=0, **kwargs):
+    def __init__(self, num_classes=199, num_heads=4, num_layers=2, embed_size=512,
+                 sequence_length=16, cnn='rn34', gcn='AAGCN', freeze_layers=0,
+                 dropout=0, use_cbam_t1=True, use_cbam_t2=True, **kwargs):
         super().__init__()
         print("Model: VTNHCPF_GCN")
         self.sequence_length = sequence_length
         self.embed_size = embed_size
         self.num_classes = num_classes
+        self.use_cbam_t2 = use_cbam_t2
 
-        self.feature_extractor = FeatureExtractor(cnn, embed_size, freeze_layers)
+        self.feature_extractor = FeatureExtractor(cnn, embed_size, freeze_layers,
+                                                  use_cbam=use_cbam_t1)
         self.feature_extractor_gcn = FeatureExtractorGCN(gcn, freeze_layers)
 
-        num_attn_features = embed_size
-        num_gcn_features = int(embed_size/2)
+        num_attn_features = embed_size                         # 512
+        num_gcn_features = int(embed_size / 2)                 # 256
         pose_flow_features = 106
-        # pose_flow_features = 0
-        add_attn_features = 0
-        self.norm = MMTensorNorm(-1)
-        self.bottle_mm = nn.Linear(pose_flow_features + num_attn_features + num_gcn_features, num_attn_features + add_attn_features)
+        add_attn_features = embed_size                         # 512
 
-        self.self_attention_decoder = SelfAttention(num_attn_features + add_attn_features, num_attn_features + add_attn_features,
-                                                    [num_heads] * num_layers,
-                                                    self.sequence_length, layer_norm=True,dropout = dropout)
-        self.classifier = LinearClassifier(num_attn_features + add_attn_features, num_classes, dropout)
-        self.num_attn_features  = num_attn_features + add_attn_features
+        # Concat input dim:
+        # RGB(2 hands * embed_size) + AGCN(num_gcn_features) + PF(106)
+        # = 1024 + 256 + 106 = 1386  (HANDCROP)
+        rgb_dim = num_attn_features * 2
+        concat_dim = rgb_dim + num_gcn_features + pose_flow_features
+        out_dim = num_attn_features + add_attn_features        # 1024
+
+        self.norm = MMTensorNorm(-1)
+        self.bottle_mm = nn.Linear(concat_dim, out_dim)
+
+        # CS-MAC tầng 2 cho 3-stream [RGB=1024, AGCN=256, PF=106]
+        if use_cbam_t2:
+            self.csmac = CSMAC(stream_dims=[rgb_dim, num_gcn_features, pose_flow_features],
+                               common_dim=256, num_heads=4)
+
+        self.self_attention_decoder = SelfAttention(
+            out_dim, out_dim,
+            [num_heads] * num_layers,
+            self.sequence_length, layer_norm=True, dropout=dropout
+        )
+        self.classifier = LinearClassifier(out_dim, num_classes, dropout)
+        self.num_attn_features = out_dim
         self.dropout = dropout
         self.num_classes = num_classes
         self.relu = F.relu
 
-    def reset_head(self,num_classes):
+    def reset_head(self, num_classes):
         self.classifier = LinearClassifier(self.num_attn_features, num_classes, self.dropout)
-        print("Reset to ",num_classes)
+        print("Reset to ", num_classes)
 
-    def forward_features(self, features = None,poseflow = None, features_keypoint = None):
+    def forward_features(self, features=None, poseflow=None, features_keypoint=None):
+        # cat: [RGB=1024, AGCN=256, PF=106] = 1386
+        zp = torch.cat((features, features_keypoint, poseflow), dim=-1)
 
-        # Reshape to put both hand crops on the same axis.
-       
-        zp = torch.cat((features,features_keypoint,poseflow), dim=-1)
+        if self.use_cbam_t2:
+            zp = self.csmac(zp)                                # CS-MAC tầng 2
 
         zp = self.norm(zp)
         zp = self.relu(self.bottle_mm(zp))
-
         zp = self.self_attention_decoder(zp)
-
         return zp
-    
-    def forward(self, clip = None,poseflow = None,keypoints = None,**kwargs):
-        """Extract the image feature vectors."""
-        rgb_clip, pose_clip = clip,poseflow
 
-        # Reshape to put both hand crops on the same axis.
+    def forward(self, clip=None, poseflow=None, keypoints=None, **kwargs):
+        rgb_clip, pose_clip = clip, poseflow
         b, t, x, c, h, w = rgb_clip.size()
         rgb_clip = rgb_clip.view(b, t * x, c, h, w)
         zc = self.feature_extractor(rgb_clip)
-        # Reshape back to extract features of both wrist crops as one feature vector.
-        zc = zc.view(b, t, -1)    
-        zk = self.feature_extractor_gcn(keypoints)
+        zc = zc.view(b, t, -1)                                 # (B, T, 1024)
 
-        zp = torch.cat((zc,pose_clip,zk), dim=-1)
+        zk = self.feature_extractor_gcn(keypoints)             # (B, T, 256)
 
-        zp = self.norm(zp)
-        zp = self.relu(self.bottle_mm(zp))
-
-        zp = self.self_attention_decoder(zp)
-
+        zp = self.forward_features(zc, pose_clip, zk)
         y = self.classifier(zp)
-
-        return {'logits':y.mean(1)} # train
-        # return y.mean(1) # convert to script
-
+        return {'logits': y.mean(1)}
 
 
 class VTNHCPF_Three_View(nn.Module):
@@ -215,21 +216,44 @@ class VTNHCPF_Three_View(nn.Module):
         }
 
 class VTN3GCN(nn.Module):
-    def __init__(self, num_classes=199, num_heads=4, num_layers=2, embed_size=512, sequence_length=16, cnn='rn34',
-                 gcn='AAGCN', freeze_layers=0, dropout=0, **kwargs):
+    def __init__(self, num_classes=199, num_heads=4, num_layers=2, embed_size=512,
+                 sequence_length=16, cnn='rn34', gcn='AAGCN', freeze_layers=0,
+                 dropout=0, use_cbam_t1=True, use_cbam_t2=True, use_cbam_t3=True,
+                 **kwargs):
         super().__init__()
         print("Model: VTN3GCN")
-        self.center = VTNHCPF(num_classes,num_heads,num_layers,embed_size,sequence_length,cnn,freeze_layers,dropout,**kwargs)
-        self.left = VTNHCPF_GCN(num_classes,num_heads,num_layers,embed_size,sequence_length,cnn,gcn,freeze_layers,dropout,**kwargs)
-        self.right = VTNHCPF_GCN(num_classes,num_heads,num_layers,embed_size,sequence_length,cnn,gcn,freeze_layers,dropout,**kwargs)
-        self.classifier = LinearClassifier(embed_size*3, num_classes, dropout)
+        self.use_cbam_t3 = use_cbam_t3
+
+        # 3 sub-models — share flag T1, T2 xuống dưới
+        common_kwargs = dict(
+            num_classes=num_classes, num_heads=num_heads, num_layers=num_layers,
+            embed_size=embed_size, sequence_length=sequence_length, cnn=cnn,
+            freeze_layers=freeze_layers, dropout=dropout,
+            use_cbam_t1=use_cbam_t1, use_cbam_t2=use_cbam_t2
+        )
+        # Không truyền **kwargs xuống sub-models để tránh duplicate keys
+        self.center = VTNHCPF(**common_kwargs)
+        self.left   = VTNHCPF_GCN(gcn=gcn, **common_kwargs)
+        self.right  = VTNHCPF_GCN(gcn=gcn, **common_kwargs)
+
+        # Mỗi view ra dim = embed_size * 2 = 1024
+        view_dim = embed_size * 2
+        self.view_dim = view_dim
+
+        # FIX BUG: classifier đúng phải là embed_size*6 = 3072 (không phải 1536)
+        self.classifier = LinearClassifier(view_dim * 3, num_classes, dropout)
+
+        # Tầng 3: IVHF
+        if use_cbam_t3:
+            self.ivhf = IVHF(view_dim=view_dim)
+
         self.embed_size = embed_size
         self.feature_extractor = None
         self.feature_extractor_gcn_right = None
         self.feature_extractor_gcn_left = None
+
     def add_backbone(self):
         self.feature_extractor = self.center.feature_extractor
-
         self.feature_extractor_gcn_right = self.right.feature_extractor_gcn
         self.feature_extractor_gcn_left = self.left.feature_extractor_gcn
 
@@ -237,16 +261,14 @@ class VTN3GCN(nn.Module):
         self.center.feature_extractor = nn.Identity()
         self.left.feature_extractor = nn.Identity()
         self.right.feature_extractor = nn.Identity()
-
         self.left.feature_extractor_gcn = nn.Identity()
         self.right.feature_extractor_gcn = nn.Identity()
-
         self.center.classifier = nn.Identity()
         self.left.classifier = nn.Identity()
         self.right.classifier = nn.Identity()
         print("Remove head and backbone")
-    
-    def freeze(self,layers = 2):
+
+    def freeze(self, layers=2):
         print(f"Freeze {layers} layers attn")
         for i in range(layers):
             for param in self.center.self_attention_decoder.layers[i].parameters():
@@ -255,53 +277,76 @@ class VTN3GCN(nn.Module):
                 param.requires_grad = False
             for param in self.right.self_attention_decoder.layers[i].parameters():
                 param.requires_grad = False
-    def forward_features(self,left = None,center = None,right = None,left_kp = None,right_kp=None,center_kp=None,
-                         center_pf = None,left_pf = None,right_pf = None): 
+
+    def forward_features(self, left=None, center=None, right=None, left_kp=None, right_kp=None, 
+                     center_kp=None, center_pf=None, left_pf=None, right_pf=None): 
+        # HANDCROP mode
         b, t, x, c, h, w = left.size()
-        left_feature = self.feature_extractor(left.view(b, t * x, c, h, w)).view(b,t,-1)
-        right_feature = self.feature_extractor(right.view(b, t * x, c, h, w)).view(b,t,-1)
-        center_feature = self.feature_extractor(center.view(b, t * x, c, h, w)).view(b,t,-1)
+        
+        # Gộp x vào b, giữ nguyên t
+        left_in = left.transpose(1, 2).contiguous().view(b * x, t, c, h, w)
+        right_in = right.transpose(1, 2).contiguous().view(b * x, t, c, h, w)
+        center_in = center.transpose(1, 2).contiguous().view(b * x, t, c, h, w)
+
+        # Đi qua FeatureExtractor (có chứa ST-CBAM)
+        left_feature = self.feature_extractor(left_in)
+        right_feature = self.feature_extractor(right_in)
+        center_feature = self.feature_extractor(center_in)
+
+        # Tách x ra và gộp vào dim cuối
+        left_feature = left_feature.view(b, x, t, -1).transpose(1, 2).contiguous().view(b, t, -1)
+        right_feature = right_feature.view(b, x, t, -1).transpose(1, 2).contiguous().view(b, t, -1)
+        center_feature = center_feature.view(b, x, t, -1).transpose(1, 2).contiguous().view(b, t, -1)
 
         left_kp_feature = self.feature_extractor_gcn_left(left_kp)
         right_kp_feature = self.feature_extractor_gcn_right(right_kp)
         
-        left_ft = self.left.forward_features(left_feature,left_kp_feature,left_pf).mean(1)
-        center_ft = self.center.forward_features(center_feature,center_pf).mean(1)
-        right_ft = self.right.forward_features(right_feature,right_kp_feature,right_pf).mean(1)
+        left_ft = self.left.forward_features(left_feature, left_kp_feature, left_pf).mean(1)
+        center_ft = self.center.forward_features(center_feature, center_pf).mean(1)
+        right_ft = self.right.forward_features(right_feature, right_kp_feature, right_pf).mean(1)
         
-        output_features = torch.cat([left_ft,center_ft,right_ft],dim = -1)
-       
+        output_features = torch.cat([left_ft, center_ft, right_ft], dim=-1)
         return output_features
-    def forward(self,left = None,center = None,right = None,left_kp = None,right_kp=None,center_kp=None,
-                center_pf = None,left_pf = None,right_pf = None):  
-        # b, t, x, c, h, w = left.size()
 
-        # left_feature = self.feature_extractor(left.view(b, t * x, c, h, w)).view(b,t,-1)
-        # right_feature = self.feature_extractor(right.view(b, t * x, c, h, w)).view(b,t,-1)
-        # center_feature = self.feature_extractor(center.view(b, t * x, c, h, w)).view(b,t,-1)
+    def forward(self, left=None, center=None, right=None,
+                left_kp=None, right_kp=None, center_kp=None,
+                center_pf=None, left_pf=None, right_pf=None):
+        
+        # CHẾ ĐỘ HANDCROP 6 CHIỀU
+        b, t, x, c, h, w = left.size()
 
-        ###NO HANDCROP###
-        b, t, c, h, w = left.size()
+        # 1. BẢO VỆ TRỤC THỜI GIAN: Đảo x lên gộp với b, giữ t nguyên vẹn
+        left_in = left.transpose(1, 2).contiguous().view(b * x, t, c, h, w)
+        right_in = right.transpose(1, 2).contiguous().view(b * x, t, c, h, w)
+        center_in = center.transpose(1, 2).contiguous().view(b * x, t, c, h, w)
 
-        left_feature = self.feature_extractor(left.view(b, t, c, h, w)).view(b,t,-1)
-        right_feature = self.feature_extractor(right.view(b, t, c, h, w)).view(b,t,-1)
-        center_feature = self.feature_extractor(center.view(b, t, c, h, w)).view(b,t,-1)
-        ######
+        # 2. Đưa qua Feature Extractor (Chứa ST-CBAM)
+        left_feature = self.feature_extractor(left_in)
+        right_feature = self.feature_extractor(right_in)
+        center_feature = self.feature_extractor(center_in)
 
-        left_kp_feature = self.feature_extractor_gcn_left(left_kp)
+        # 3. Lật lại đúng shape (b, t, -1) để tương thích với các layer sau
+        left_feature = left_feature.view(b, x, t, -1).transpose(1, 2).contiguous().view(b, t, -1)
+        right_feature = right_feature.view(b, x, t, -1).transpose(1, 2).contiguous().view(b, t, -1)
+        center_feature = center_feature.view(b, x, t, -1).transpose(1, 2).contiguous().view(b, t, -1)
+
+        # 4. Trích xuất Keypoint và Gộp luồng (CSMAC)
+        left_kp_feature  = self.feature_extractor_gcn_left(left_kp)
         right_kp_feature = self.feature_extractor_gcn_right(right_kp)
-        
-        left_ft = self.left.forward_features(left_feature,left_kp_feature,left_pf).mean(1)
-        center_ft = self.center.forward_features(center_feature,center_pf).mean(1)
-        right_ft = self.right.forward_features(right_feature,right_kp_feature,right_pf).mean(1)
-        
-        output_features = torch.cat([left_ft,center_ft,right_ft],dim = -1)
 
+        left_ft   = self.left.forward_features(left_feature, left_kp_feature, left_pf).mean(1)
+        center_ft = self.center.forward_features(center_feature, center_pf).mean(1)
+        right_ft  = self.right.forward_features(right_feature, right_kp_feature, right_pf).mean(1)
+
+        # 5. Trộn 3 góc nhìn (IVHF Tầng 3)
+        if self.use_cbam_t3:
+            output_features = self.ivhf(left_ft, center_ft, right_ft)
+        else:
+            output_features = torch.cat([left_ft, center_ft, right_ft], dim=-1)
+
+        # 6. Phân loại
         y = self.classifier(output_features)
-
-        return {
-            'logits':y
-        }
+        return {'logits': y}
 class VTNHCPF_OneView_Sim_Knowledge_Distilation(nn.Module):
     def __init__(self, num_classes=199, num_heads=4, num_layers=2, embed_size=512, sequence_length=16, cnn='rn34',
                  freeze_layers=0, dropout=0, **kwargs):

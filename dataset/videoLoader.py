@@ -23,9 +23,10 @@ def get_selected_indexs(vlen, num_frames=64, is_train=True, setting=['consecutiv
         if is_train:
             if vlen > num_frames:
                 
-                if train_p == 'consecutive':
-                    start = np.random.randint(0, vlen - num_frames, 1)[0]
-                    selected_index = np.arange(start, start+num_frames)
+                if train_p == 'consecutive' or train_p == "segment":
+                    data_chunks = np.array_split(range(vlen), num_frames)
+                    random_elements = np.array([np.random.choice(chunk) for chunk in data_chunks])
+                    selected_index = sorted(random_elements)
                 elif train_p == 'center_stride':
                     frame_start = (vlen - num_frames) // (2 * temporal_stride)
                     frame_end = frame_start + num_frames * temporal_stride
@@ -43,26 +44,6 @@ def get_selected_indexs(vlen, num_frames=64, is_train=True, setting=['consecutiv
                     np.random.shuffle(selected_index)
                     selected_index = selected_index[:num_frames]  #to make the length equal to that of no drop
                     selected_index = sorted(selected_index)
-                elif train_p == "segment":
-                    # selected_index = []
-                    # segment_length = int(vlen / num_frames) # vlen: độ dài video, num_frames: số frame cần lấy
-                    # mod = vlen - segment_length*num_frames
-                    # # Duyệt qua từng segment
-                    # for i in range(num_frames):
-                    #     # Tìm vị trí frame bắt đầu của segment
-                    #     start_frame = i * segment_length
-                    
-                    #     # Tìm vị trí frame kết thúc của segment
-                    #     end_frame = (i + 1) * segment_length
-
-                    #     # Chọn ngẫu nhiên 1 frame trong segment
-                    #     random_frame_index = random.randint(start_frame, end_frame - 1)
-                    #     selected_index.append(random_frame_index)
-                    # # balance the index of samples at  the start and end of video
-                    # selected_index = (np.array(selected_index) + random.randint(0, mod)).tolist()
-                    data_chunks = np.array_split(range(vlen), num_frames)
-                    random_elements = np.array([np.random.choice(chunk) for chunk in data_chunks])
-                    selected_index = sorted(random_elements)
                 else:
                     selected_index = np.arange(0, vlen)
             elif vlen < num_frames:
@@ -202,10 +183,20 @@ def load_batch_video(zip_file, names, vlens, dataset_name, is_train,
     for name, vlen, ori_vfile in zip(names, vlens, ori_video_files):
         video, selected_index, pad = load_video(zip_file, name, vlen, num_output_frames, dataset_name, is_train, index_setting, temp_scale, ori_vfile)
         # video = torch.tensor(video).to(torch.uint8)
-        video = torch.tensor(video).float()  #T,H,W,C
+        video = torch.tensor(video).float()  # T,H,W,C
+        video = video.permute(0, 3, 1, 2)    # T,C,H,W
+        
         if 'NMFs-CSL' in dataset_name:
-            video = torchvision.transforms.functional.resize(video.permute(0,3,1,2), [256,256]).permute(0,2,3,1)
-        video = torchvision.transforms.functional.resize(video.permute(0,3,1,2), [256,256]).permute(0,2,3,1) # test 
+            video = torchvision.transforms.functional.resize(video, [256, 256])
+
+        if is_train:
+            rgb_augment = torchvision.transforms.Compose([
+                torchvision.transforms.RandomApply([torchvision.transforms.ColorJitter(brightness=0.2, contrast=0.2)], p=0.3),
+                torchvision.transforms.RandomApply([torchvision.transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))], p=0.3)
+            ])
+            video = rgb_augment(video)
+            
+        video = torchvision.transforms.functional.resize(video, [256, 256]).permute(0, 2, 3, 1) # test 
         video /= 255
         batch_videos.append(video) #wo transformed!!
         
@@ -213,6 +204,10 @@ def load_batch_video(zip_file, names, vlens, dataset_name, is_train,
             kps = name2keypoint[name][selected_index,:,:]
             if pad is not None:
                 kps = pad_array(kps, pad)
+
+            if is_train:
+                noise = np.random.normal(0, 0.01, size=kps.shape)
+                kps = kps + noise
 
             batch_keypoints.append(torch.from_numpy(kps).float()) # T,N,3
         else:

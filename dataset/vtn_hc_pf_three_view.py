@@ -17,9 +17,10 @@ from decord import VideoReader
 import threading
 import math
 from utils.video_augmentation import *
-
-
-
+from utils.video_augmentation import (
+    TemporalSpeedJitter, KeypointGaussianNoise, KeypointDropJoint,
+    HandCropRandomErasing, TemporalFrameDropout, SyncedMultiViewTransform
+)
 class VTNHCPF_ThreeViewsData(Dataset):
     def __init__(self, base_url,split,dataset_cfg,**kwargs):
         
@@ -246,18 +247,27 @@ class VTN3GCNData(Dataset):
                                         DeleteFlowKeypoints(list(range(0, 5))),
                                         ToFloatTensor())
         self.transform = self.build_transform(split)
+        
+        if self.is_train:
+            self.global_augs = [TemporalSpeedJitter(p=0.8), TemporalFrameDropout(p=0.3)]
+            self.per_view_augs = [
+                KeypointGaussianNoise(p=0.5),
+                KeypointDropJoint(p=0.4),
+                HandCropRandomErasing(p=0.5),
+            ]
+            self.synced_spatial = SyncedMultiViewTransform(transforms_list=[]) # Tránh crash do spatial đã chạy ở build_transform
+        else:
+            self.global_augs = []
+            self.per_view_augs = []
+            self.synced_spatial = None
+
     def build_transform(self,split):
         if split == 'train':
             print("Build train transform")
             transform = Compose(
                                 Scale(self.data_cfg['vid_transform']['IMAGE_SIZE'] * 8 // 7),
                                 MultiScaleCrop((self.data_cfg['vid_transform']['IMAGE_SIZE'], self.data_cfg['vid_transform']['IMAGE_SIZE']), scales),
-                                RandomHorizontalFlip(), 
-                                RandomRotate(p=0.3),
-                                RandomShear(0.3,0.3,p = 0.3),
-                                Salt( p = 0.3),
-                                GaussianBlur( sigma=1,p = 0.3),
-                                ColorJitter(0.5, 0.5, 0.5,p = 0.3),
+                                ColorJitter(0.5, 0.5, 0.5, p = 0.3),
                                 ToFloatTensor(), PermuteImage(),
                                 Normalize(self.data_cfg['vid_transform']['NORM_MEAN_IMGNET'],self.data_cfg['vid_transform']['NORM_STD_IMGNET']))
         else:
@@ -441,6 +451,25 @@ class VTN3GCNData(Dataset):
 
         center, left, right, label = self.train_labels.iloc[idx].values
         center_video, center_pf, center_kp, left_video, left_pf, left_kp, right_video, right_pf, right_kp = self.read_videos(center, left, right)
+
+        if self.is_train:
+            left_data = {'rgb': left_video, 'kp': left_kp, 'pf': left_pf}
+            center_data = {'rgb': center_video, 'kp': center_kp, 'pf': center_pf}
+            right_data = {'rgb': right_video, 'kp': right_kp, 'pf': right_pf}
+            
+            for aug in self.global_augs:
+                left_data, center_data, right_data = aug.apply_synced(left_data, center_data, right_data)
+                
+            left_data, center_data, right_data = self.synced_spatial(left_data, center_data, right_data)
+            
+            for aug in self.per_view_augs:
+                left_data = aug(left_data)
+                center_data = aug(center_data)
+                right_data = aug(right_data)
+
+            left_video, left_kp, left_pf = left_data['rgb'], left_data['kp'], left_data['pf']
+            center_video, center_kp, center_pf = center_data['rgb'], center_data['kp'], center_data['pf']
+            right_video, right_kp, right_pf = right_data['rgb'], right_data['kp'], right_data['pf']
 
         # Chọn một số ngẫu nhiên từ 1 đến 1000
         random_number = np.random.randint(1, 1001)

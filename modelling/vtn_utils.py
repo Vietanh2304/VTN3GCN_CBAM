@@ -13,12 +13,17 @@ import torchvision.models as models
 import torchvision
 from AAGCN.aagcn import AAGCN
 from pytorch_lightning.utilities.migration import pl_legacy_patch
-
+from .cbam_modules import STCBAM_AttnPool
 class FeatureExtractor(nn.Module):
-    """Feature extractor for RGB clips, powered by a 2D CNN backbone."""
+    """Feature extractor for RGB clips, powered by a 2D CNN backbone.
 
-    def __init__(self, cnn='rn34', embed_size=512, freeze_layers=0):
-        """Initialize the feature extractor with given CNN backbone and desired feature size."""
+    NÂNG CẤP: Dùng STCBAM_AttnPool thay cho AvgPool truyền thống.
+    - use_cbam=True : bật ST-CBAM + Attention Pooling (mặc định)
+    - use_cbam=False: dùng AvgPool gốc (để ablation)
+    """
+
+    def __init__(self, cnn='rn34', embed_size=512, freeze_layers=0,
+                 use_cbam=True):
         super().__init__()
 
         if cnn == 'rn18':
@@ -30,39 +35,46 @@ class FeatureExtractor(nn.Module):
         else:
             raise ValueError(f'Unknown value for `cnn`: {cnn}')
 
-        if cnn == 'rn18' or cnn == 'rn34' or cnn =='rn50':
+        if cnn in ('rn18', 'rn34', 'rn50'):
             self.resnet = nn.Sequential(*list(model.children())[:-2])
 
-        # Freeze layers if requested.
         for layer_index in range(freeze_layers):
             for param in self.resnet[layer_index].parameters(True):
                 param.requires_grad = False
 
-        # ResNet-18 and ResNet-34 output 512 features after pooling.
-        if embed_size != 512 and (cnn == 'rn18' or cnn == 'rn34'):
-            self.pointwise_conv = nn.Conv2d(512, embed_size, 1)
-        else:
-            self.pointwise_conv = nn.Identity()
-
+        # Pointwise conv để đổi channel nếu embed_size khác 512
+        # Pointwise conv để đổi channel nếu cần
         if cnn == 'rn50':
             self.pointwise_conv = nn.Conv2d(2048, embed_size, 1)
-            
-        self.avg_pool = F.adaptive_avg_pool2d
-        
+            cbam_channels = embed_size
+        elif embed_size != 512 and cnn in ('rn18', 'rn34'):
+            self.pointwise_conv = nn.Conv2d(512, embed_size, 1)
+            cbam_channels = embed_size
+        else:
+            self.pointwise_conv = nn.Identity()
+            cbam_channels = 512
 
+        self.use_cbam = use_cbam
+        if use_cbam:
+            self.cbam_pool = STCBAM_AttnPool(in_channels=cbam_channels)
+        else:
+            self.avg_pool = F.adaptive_avg_pool2d  # giữ AvgPool cho ablation
+
+    # Trong class FeatureExtractor, sửa hàm forward
     def forward(self, rgb_clip):
-        """Extract features from the RGB images."""
         b, t, c, h, w = rgb_clip.size()
-        # Process all sequential data in parallel as a large mini-batch.
-        rgb_clip = rgb_clip.view(b * t, c, h, w)
-
-        features = self.resnet(rgb_clip)
-        # Transform to the desired embedding size.
+        
+        # Nếu dùng STCBAM tầng 1, ta cần áp dụng khi còn đủ chiều B, T
+        # (Giả sử STCBAM được gọi ở đây hoặc bên trong self.resnet)
+        
+        rgb_clip_flat = rgb_clip.view(b * t, c, h, w)
+        features = self.resnet(rgb_clip_flat)
         features = self.pointwise_conv(features)
 
-        # Transform the output of the ResNet (C x H x W) to a single feature vector using pooling.
-        features = self.avg_pool(features, 1).squeeze()
-        # Restore the original dimensions of the tensor.
+        # SỬA DÒNG SQUEEZE: Chỉ xóa 2 chiều spatial cuối (H, W)
+        features = self.avg_pool(features, 1).squeeze(-1).squeeze(-1)
+        
+        # Restore dimensions
         features = features.view(b, t, -1)
         return features
     

@@ -1,0 +1,49 @@
+data:
+  dataset_name: "MM-WLAuslan"
+  base_url: "/home/ibmelab/Documents/GG/VSLRecognition/CTRGCN -UC/Ubuntu/mnt/sda1/VSLR_Storage/MM-WLAuslan"
+  model_name: "VTN3GCN"
+  num_output_frames: 16
+  temporal_stride: 2
+  crop_two_hand: true 
+  center_kp: false
+  center_missing_rates: 0.1
+  left_missing_rates: 0.1
+  right_missing_rates: 0.1
+  vid_transform:
+    IMAGE_SIZE: 224
+    NORM_MEAN_IMGNET: [0.485, 0.456, 0.406]
+    NORM_STD_IMGNET: [0.229, 0.224, 0.225]
+  transform_cfg:
+    index_setting: ['consecutive', 'pad', 'central', 'pad']
+
+model:
+  num_classes: 3215
+  num_heads: 4
+  num_layers: 2
+  embed_size: 512
+  cnn: 'rn34'
+  gcn: 'AAGCN'
+  freeze_layers: 0
+  dropout: 0.1
+  # Kích hoạt 3 tầng CBAM (LC3)
+  use_cbam_t1: true
+  use_cbam_t2: true
+  use_cbam_t3: true
+
+training:
+  experiment_name: "VTN3GCN_LC3_CBAM_Auslan_20224170"
+  batch_size: 4
+  num_workers: 4
+  pretrained: true
+  pretrained_model: "checkpoints/VTNGCN/VTNGCN finetune autsl to vsl for one view no crop hand/best_checkpoints.pth"
+  epochs: 50
+  learning_rate: 0.0001
+  w_decay: 0.0001
+  optimzer: "Adam"
+  criterion: "MyCustomLoss"
+  label_smoothing: 0.1
+  lr_scheduler: "ReduceLROnPlateau"
+  scheduler_factor: 0.5
+  scheduler_patience: 3
+  print_stats: true
+  log_freq: 1

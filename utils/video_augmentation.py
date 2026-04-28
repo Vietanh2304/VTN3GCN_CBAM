@@ -520,3 +520,123 @@ class DeleteFlowKeypoints(object):
 
     def __call__(self, sample):
         return np.delete(sample, self.indices, axis=0)
+
+import math
+
+class TemporalSpeedJitter(object):
+    def __init__(self, p=0.8, factor_range=(0.8, 1.2), t_clamp=(8, 24)):
+        self.p = p
+        self.factor_range = factor_range
+        self.t_clamp = t_clamp
+
+    def randomize_parameters(self):
+        self._rand = random.random()
+        self._factor = random.uniform(self.factor_range[0], self.factor_range[1])
+
+    def apply_synced(self, left, center, right):
+        self.randomize_parameters()
+        if self._rand < self.p:
+            T = left['rgb'].shape[0]
+            T_new = max(self.t_clamp[0], min(self.t_clamp[1], round(T * self._factor)))
+            if T_new != T:
+                idx = torch.linspace(0, T - 1, T_new).round().long()
+                for view in [left, center, right]:
+                    view['rgb'] = view['rgb'][idx]
+                    view['kp'] = view['kp'][:, idx, ...]
+                    view['pf'] = view['pf'][idx]
+        return left, center, right
+
+class KeypointGaussianNoise(object):
+    def __init__(self, p=0.5, sigma_ratio=0.05):
+        self.p = p
+        self.sigma_ratio = sigma_ratio
+
+    def __call__(self, data_dict):
+        if random.random() < self.p:
+            kp = data_dict['kp']
+            std = kp.std(dim=[1, 2], keepdim=True)
+            std = torch.clamp(std, min=1e-6)
+            data_dict['kp'] = kp + torch.randn_like(kp) * std * self.sigma_ratio
+        return data_dict
+
+class KeypointDropJoint(object):
+    def __init__(self, p=0.4, num_joints=(1, 3), num_frames=(1, 3)):
+        self.p = p
+        self.num_joints = num_joints
+        self.num_frames = num_frames
+
+    def __call__(self, data_dict):
+        if random.random() < self.p:
+            kp = data_dict['kp']
+            C, T, V, M = kp.shape
+            k = random.randint(self.num_joints[0], self.num_joints[1])
+            n_t = random.randint(self.num_frames[0], self.num_frames[1])
+            if T > n_t:
+                t_start = random.randint(0, T - n_t)
+                joint_idxs = random.sample(range(V), min(k, V))
+                kp[:, t_start:t_start + n_t, joint_idxs, :] = 0
+                data_dict['kp'] = kp
+        return data_dict
+
+class HandCropRandomErasing(object):
+    def __init__(self, p=0.5, area_range=(0.02, 0.15), aspect_range=(0.3, 3.3)):
+        self.p = p
+        self.area_range = area_range
+        self.aspect_range = aspect_range
+
+    def __call__(self, data_dict):
+        if random.random() < self.p:
+            rgb = data_dict['rgb']
+            T, X, C, H, W = rgb.shape
+            area = H * W
+            for t in range(T):
+                for x in range(X):
+                    target_area = random.uniform(self.area_range[0], self.area_range[1]) * area
+                    aspect_ratio = random.uniform(self.aspect_range[0], self.aspect_range[1])
+                    h = int(round(math.sqrt(target_area * aspect_ratio)))
+                    w = int(round(math.sqrt(target_area / aspect_ratio)))
+                    if h < H and w < W:
+                        y1 = random.randint(0, H - h)
+                        x1 = random.randint(0, W - w)
+                        rgb[t, x, :, y1:y1 + h, x1:x1 + w] = random.random()
+            data_dict['rgb'] = rgb
+        return data_dict
+
+class TemporalFrameDropout(object):
+    def __init__(self, p=0.3, num_frames=(1, 2)):
+        self.p = p
+        self.num_frames = num_frames
+
+    def randomize_parameters(self):
+        self._rand = random.random()
+        self._n = random.randint(self.num_frames[0], self.num_frames[1])
+
+    def apply_synced(self, left, center, right):
+        self.randomize_parameters()
+        if self._rand < self.p:
+            T = left['rgb'].shape[0]
+            n = min(self._n, max(1, T - 1))
+            if n > 0:
+                frame_idxs = random.sample(range(T), n)
+                for view in [left, center, right]:
+                    view['rgb'][frame_idxs] = 0
+                    view['kp'][:, frame_idxs, ...] = 0
+                    view['pf'][frame_idxs] = 0
+        return left, center, right
+
+class SyncedMultiViewTransform(object):
+    def __init__(self, transforms_list):
+        self.transforms = transforms_list
+
+    def __call__(self, left_data, center_data, right_data):
+        s = random.randint(0, 2**31 - 1)
+        out = []
+        for view_data in [left_data, center_data, right_data]:
+            torch.manual_seed(s)
+            np.random.seed(s)
+            random.seed(s)
+            for t in self.transforms:
+                view_data = t(view_data)
+            out.append(view_data)
+        return out[0], out[1], out[2]
+

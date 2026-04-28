@@ -189,9 +189,9 @@ def load_model(cfg):
                 model.left.reset_head(226) # AUTSL
                 model.right.reset_head(226) # AUTSL
                 # load autsl ckpt
-                model.center.load_state_dict(new_state_dict)
-                model.right.load_state_dict(new_state_dict)
-                model.left.load_state_dict(new_state_dict)
+                model.center.load_state_dict(new_state_dict, strict=False)
+                model.right.load_state_dict(new_state_dict, strict=False)
+                model.left.load_state_dict(new_state_dict, strict=False)
                 # add backbone
                 model.add_backbone()
                 # remove center, left and right backbone
@@ -205,7 +205,7 @@ def load_model(cfg):
             else:
                 model.add_backbone()
                 model.remove_head_and_backbone()
-                model.load_state_dict(torch.load(cfg['training']['pretrained_model'],map_location='cpu'))
+                model.load_state_dict(torch.load(cfg['training']['pretrained_model'],map_location='cpu'), strict=False)
         
             print("Load VTN3GCN")
 
@@ -357,9 +357,9 @@ def load_model(cfg):
                 ckpt_path = "checkpoints/VTNGCN/VTNGCN finetune autsl to vsl for one view/best_checkpoints.pth"
                 state_dict = torch.load(ckpt_path,map_location='cpu')
                 print("Load VTN3GCN initialized weights: ",ckpt_path)
-                model.center.load_state_dict(state_dict,strict = True)
-                model.right.load_state_dict(state_dict,strict = True)
-                model.left.load_state_dict(state_dict,strict = True)
+                model.center.load_state_dict(state_dict,strict = False)
+                model.right.load_state_dict(state_dict,strict = False)
+                model.left.load_state_dict(state_dict,strict = False)
                 model.add_backbone()
                 model.remove_head_and_backbone()
                 model.freeze(layers = 0)
