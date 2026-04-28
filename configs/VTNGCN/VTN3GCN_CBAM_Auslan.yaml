@@ -1,6 +1,6 @@
 data:
   dataset_name: "MM-WLAuslan"
-  base_url: "/home/ibmelab/Documents/GG/VSLRecognition/CTRGCN -UC/Ubuntu/mnt/sda1/VSLR_Storage/MM-WLAuslan"
+  base_url: "/mnt/sda1/VSLR_Storage/MM-WLAuslan"
   model_name: "VTN3GCN"
   num_output_frames: 16
   temporal_stride: 2
