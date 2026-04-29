@@ -1,8 +1,8 @@
 data:
   dataset_name: "VN_SIGN"
   base_url: "/mnt/sda1/VSLR_Storage/MM-WLAuslan"
-  label_folder: "labels"
-  data_type: "labels"
+  label_folder: "labels_clean"
+  data_type: "labels_clean"
   model_name: "VTN3GCN"
   num_output_frames: 16
   temporal_stride: 2
@@ -13,6 +13,10 @@ data:
   right_missing_rates: 0.1
   WRIST_DELTA: 50
   SHOULDER_DIST_EPSILON: 1.2
+  wholebody_h5_dir: "/mnt/sda1/VSLR_Storage/MM-WLAuslan/wholebody_h5"
+  poseflow_h5_dir: "/mnt/sda1/VSLR_Storage/MM-WLAuslan/poseflow_h5"
+  hand_kp_h5_dir: "/mnt/sda1/VSLR_Storage/MM-WLAuslan/hand_keypoints_h5"
+  num_keypoints: 133
   vid_transform:
     IMAGE_SIZE: 224
     NORM_MEAN_IMGNET: [0.485, 0.456, 0.406]

@@ -1,4 +1,5 @@
 import os
+import h5py
 import numpy as np
 import torch
 from torch.utils.data import  Dataset
@@ -45,10 +46,15 @@ class VTNHCPF_ThreeViewsData(Dataset):
         self.base_url = base_url
         self.data_cfg = dataset_cfg
         self.data_name = dataset_cfg['dataset_name']
-        self.pose_transform  = Compose(DeleteFlowKeypoints(list(range(112, 113))),
-                                        DeleteFlowKeypoints(list(range(11, 92))),
-                                        DeleteFlowKeypoints(list(range(0, 5))),
-                                        ToFloatTensor())
+        self.pose_transform  = Compose(
+            DeleteFlowKeypoints(list(range(11, 91))),  # delete foot+face → keep body[0:11] + hands[91:133] = 53 kp
+            ToFloatTensor()
+        )
+        # HDF5 paths — opened lazily per worker in __getitem__
+        self.wholebody_h5_path = os.path.join(base_url, dataset_cfg['wholebody_h5_dir'].split('MM-WLAuslan/')[-1], f'{split}.h5') if 'wholebody_h5_dir' in dataset_cfg else None
+        self.poseflow_h5_path = os.path.join(base_url, dataset_cfg['poseflow_h5_dir'].split('MM-WLAuslan/')[-1], f'{split}.h5') if 'poseflow_h5_dir' in dataset_cfg else None
+        self._wholebody_h5 = None
+        self._poseflow_h5 = None
         self.transform = self.build_transform(split)
     def build_transform(self,split):
         if split == 'train':
@@ -74,6 +80,12 @@ class VTNHCPF_ThreeViewsData(Dataset):
                                 Normalize(self.data_cfg['vid_transform']['NORM_MEAN_IMGNET'],self.data_cfg['vid_transform']['NORM_STD_IMGNET']))
         return transform
     
+    def _ensure_h5_open(self):
+        if self._wholebody_h5 is None and self.wholebody_h5_path:
+            self._wholebody_h5 = h5py.File(self.wholebody_h5_path, 'r')
+        if self._poseflow_h5 is None and self.poseflow_h5_path:
+            self._poseflow_h5 = h5py.File(self.poseflow_h5_path, 'r')
+
     def count_frames(self,video_path):
         cap = cv2.VideoCapture(video_path)
         # Đọc kích thước của video
@@ -81,8 +93,14 @@ class VTNHCPF_ThreeViewsData(Dataset):
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
-        n_poses = len(glob.glob(video_path.replace("videos","poses").replace('.mp4','/*')))
-        total_frames = min(total_frames,n_poses)
+        # HDF5 frame count lookup (replaces glob on poses/ folder)
+        video_id = os.path.basename(video_path).replace('.mp4', '')
+        self._ensure_h5_open()
+        if self._wholebody_h5 is not None and video_id in self._wholebody_h5:
+            n_poses = self._wholebody_h5[video_id]['wholebody_threshold_02'].shape[0]
+        else:
+            n_poses = 0
+        total_frames = min(total_frames, n_poses)
         return total_frames,width,height
     def read_one_view(self,name,selected_index,width,height):
        
@@ -95,22 +113,15 @@ class VTNHCPF_ThreeViewsData(Dataset):
             path = f'{self.base_url}/videos/{name}'   
         vr = VideoReader(path,width=320, height=256)
         frames = vr.get_batch(selected_index).asnumpy()
+        self._ensure_h5_open()
         for frame,frame_index in zip(frames,selected_index):
             if self.data_cfg['crop_two_hand']:
-                
-                kp_path = os.path.join(self.base_url,'poses',name.replace(".mp4",""),
-                                    name.replace(".mp4","") + '_{:06d}_'.format(frame_index) + 'keypoints.json')
-                # load keypoints
-                with open(kp_path, 'r') as keypoints_file:
-                    value = json.loads(keypoints_file.read())
-                    
-                    keypoints = np.array(value['pose_threshold_02']) # 26,3
-                    x = 320*keypoints[:,0]/width
-                    y = 256*keypoints[:,1]/height
-                   
-                keypoints = np.stack((x, y), axis=0)
-               
-           
+                video_id = name.replace(".mp4", "")
+                keypoints_full = self._wholebody_h5[video_id]['wholebody_threshold_02'][frame_index]  # (133, 3)
+                x = 320 * keypoints_full[:, 0] / width
+                y = 256 * keypoints_full[:, 1] / height
+                keypoints = np.stack((x, y), axis=0)  # (2, 133)
+
             crops = None
             if self.data_cfg['crop_two_hand']:
                 crops,missing_wrists_left,missing_wrists_right = crop_hand(frame,keypoints,self.data_cfg['WRIST_DELTA'],self.data_cfg['SHOULDER_DIST_EPSILON'],
@@ -119,31 +130,20 @@ class VTNHCPF_ThreeViewsData(Dataset):
                 crops = self.transform(frame)
             clip.append(crops)
 
-            # Let's say the first frame has a pose flow of 0 
-            poseflow = None
+            # Let's say the first frame has a pose flow of 0
             frame_index_poseflow = frame_index
-            if frame_index_poseflow > 0:
-                full_path = os.path.join(self.base_url,'poseflow',name.replace(".mp4",""),
-                                        'flow_{:05d}.npy'.format(frame_index_poseflow))
-                while not os.path.isfile(full_path):  # WORKAROUND FOR MISSING FILES!!!
-                    print("Missing File",full_path)
-                    frame_index_poseflow -= 1
-                    full_path = os.path.join(self.base_url,'poseflow',name.replace(".mp4",""),
-                                        'flow_{:05d}.npy'.format(frame_index_poseflow))
-
-                value = np.load(full_path)
-                poseflow = value
-                # Normalize the angle between -1 and 1 from -pi and pi
+            video_id = name.replace(".mp4", "")
+            poseflow_data = self._poseflow_h5[video_id]['poseflow']  # (T-1, 133, 2)
+            if frame_index_poseflow > 0 and (frame_index_poseflow - 1) < poseflow_data.shape[0]:
+                poseflow = poseflow_data[frame_index_poseflow - 1].copy()  # (133, 2)
                 poseflow[:, 0] /= math.pi
-                # Magnitude is already normalized from the pre-processing done before calculating the flow
             else:
-                poseflow = np.zeros((135, 2))
-            
-            pose_transform = Compose(DeleteFlowKeypoints(list(range(114, 115))),
-                                    DeleteFlowKeypoints(list(range(19,94))),
-                                    DeleteFlowKeypoints(list(range(11, 17))),
-                                    ToFloatTensor())
+                poseflow = np.zeros((133, 2))
 
+            pose_transform = Compose(
+                DeleteFlowKeypoints(list(range(11, 91))),  # delete foot+face → keep body[0:11] + hands[91:133] = 53 kp
+                ToFloatTensor()
+            )
             poseflow = pose_transform(poseflow).view(-1)
             poseflow_clip.append(poseflow)
             
@@ -242,10 +242,17 @@ class VTN3GCNData(Dataset):
         self.base_url = base_url
         self.data_cfg = dataset_cfg
         self.data_name = dataset_cfg['dataset_name']
-        self.pose_transform  = Compose(DeleteFlowKeypoints(list(range(112, 113))),
-                                        DeleteFlowKeypoints(list(range(11, 92))),
-                                        DeleteFlowKeypoints(list(range(0, 5))),
-                                        ToFloatTensor())
+        self.pose_transform  = Compose(
+            DeleteFlowKeypoints(list(range(11, 91))),  # delete foot+face → keep body[0:11] + hands[91:133] = 53 kp
+            ToFloatTensor()
+        )
+        # HDF5 paths — opened lazily per worker in __getitem__
+        self.wholebody_h5_path = os.path.join(dataset_cfg['wholebody_h5_dir'], f'{split}.h5')
+        self.poseflow_h5_path = os.path.join(dataset_cfg['poseflow_h5_dir'], f'{split}.h5')
+        self.hand_kp_h5_path = os.path.join(dataset_cfg['hand_kp_h5_dir'], f'{split}.h5')
+        self._wholebody_h5 = None
+        self._poseflow_h5 = None
+        self._hand_kp_h5 = None
         self.transform = self.build_transform(split)
         
         if self.is_train:
@@ -280,6 +287,14 @@ class VTN3GCNData(Dataset):
                                 Normalize(self.data_cfg['vid_transform']['NORM_MEAN_IMGNET'],self.data_cfg['vid_transform']['NORM_STD_IMGNET']))
         return transform
     
+    def _ensure_h5_open(self):
+        if self._wholebody_h5 is None:
+            self._wholebody_h5 = h5py.File(self.wholebody_h5_path, 'r')
+        if self._poseflow_h5 is None:
+            self._poseflow_h5 = h5py.File(self.poseflow_h5_path, 'r')
+        if self._hand_kp_h5 is None:
+            self._hand_kp_h5 = h5py.File(self.hand_kp_h5_path, 'r')
+
     def count_frames(self,video_path):
         cap = cv2.VideoCapture(video_path)
         # Đọc kích thước của video
@@ -287,8 +302,14 @@ class VTN3GCNData(Dataset):
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
-        n_poses = len(glob.glob(video_path.replace("videos","poses").replace('.mp4','/*')))
-        total_frames = min(total_frames,n_poses)
+        # HDF5 frame count lookup (replaces glob on poses/ folder)
+        video_id = os.path.basename(video_path).replace('.mp4', '')
+        self._ensure_h5_open()
+        if video_id in self._wholebody_h5:
+            n_poses = self._wholebody_h5[video_id]['wholebody_threshold_02'].shape[0]
+        else:
+            n_poses = 0
+        total_frames = min(total_frames, n_poses)
         return total_frames,width,height
     def transform_handflow(self, handflow):
         # Convert to a PyTorch tensor and transpose to get [C, V]
@@ -306,22 +327,15 @@ class VTN3GCNData(Dataset):
             path = f'{self.base_url}/videos/{name}'   
         vr = VideoReader(path,width=320, height=256)
         frames = vr.get_batch(selected_index).asnumpy()
+        self._ensure_h5_open()
         for frame,frame_index in zip(frames,selected_index):
             if self.data_cfg['crop_two_hand']:
-                
-                kp_path = os.path.join(self.base_url,'poses',name.replace(".mp4",""),
-                                    name.replace(".mp4","") + '_{:06d}_'.format(frame_index) + 'keypoints.json')
-                # load keypoints
-                with open(kp_path, 'r') as keypoints_file:
-                    value = json.loads(keypoints_file.read())
-                    
-                    keypoints = np.array(value['pose_threshold_02']) # 26,3
-                    x = 320*keypoints[:,0]/width
-                    y = 256*keypoints[:,1]/height
-                   
-                keypoints = np.stack((x, y), axis=0)
-               
-           
+                video_id = name.replace(".mp4", "")
+                keypoints_full = self._wholebody_h5[video_id]['wholebody_threshold_02'][frame_index]  # (133, 3)
+                x = 320 * keypoints_full[:, 0] / width
+                y = 256 * keypoints_full[:, 1] / height
+                keypoints = np.stack((x, y), axis=0)  # (2, 133)
+
             crops = None
             if self.data_cfg['crop_two_hand']:
                 crops,missing_wrists_left,missing_wrists_right = crop_hand(frame,keypoints,self.data_cfg['WRIST_DELTA'],self.data_cfg['SHOULDER_DIST_EPSILON'],
@@ -330,49 +344,28 @@ class VTN3GCNData(Dataset):
                 crops = self.transform(frame)
             clip.append(crops)
 
-            # Let's say the first frame has a pose flow of 0 
-            poseflow = None
+            # Let's say the first frame has a pose flow of 0
             frame_index_poseflow = frame_index
-            if frame_index_poseflow > 0:
-                full_path = os.path.join(self.base_url,'poseflow',name.replace(".mp4",""),
-                                        'flow_{:05d}.npy'.format(frame_index_poseflow))
-                while not os.path.isfile(full_path):  # WORKAROUND FOR MISSING FILES!!!
-                    frame_index_poseflow -= 1
-                    full_path = os.path.join(self.base_url,'poseflow',name.replace(".mp4",""),
-                                        'flow_{:05d}.npy'.format(frame_index_poseflow))
-
-                value = np.load(full_path)
-                poseflow = value
-                # Normalize the angle between -1 and 1 from -pi and pi
+            video_id = name.replace(".mp4", "")
+            poseflow_data = self._poseflow_h5[video_id]['poseflow']  # (T-1, 133, 2)
+            if frame_index_poseflow > 0 and (frame_index_poseflow - 1) < poseflow_data.shape[0]:
+                poseflow = poseflow_data[frame_index_poseflow - 1].copy()  # (133, 2)
                 poseflow[:, 0] /= math.pi
-                # Magnitude is already normalized from the pre-processing done before calculating the flow
             else:
-                poseflow = np.zeros((135, 2))
-            
-            pose_transform = Compose(DeleteFlowKeypoints(list(range(114, 115))),
-                                    DeleteFlowKeypoints(list(range(19,94))),
-                                    DeleteFlowKeypoints(list(range(11, 17))),
-                                    ToFloatTensor())
+                poseflow = np.zeros((133, 2))
 
+            pose_transform = Compose(
+                DeleteFlowKeypoints(list(range(11, 91))),  # delete foot+face → keep body[0:11] + hands[91:133] = 53 kp
+                ToFloatTensor()
+            )
             poseflow = pose_transform(poseflow).view(-1)
             poseflow_clip.append(poseflow)
 
-            frame_index_handkp = frame_index
-            full_path = os.path.join(self.base_url, 'hand_keypoints', name.replace(".mp4", ""),
-                                     f'hand_kp_{frame_index_handkp:05d}.npy')
-
-            # Handle missing files by backtracking to previous frames
-            while not os.path.isfile(full_path) and frame_index_handkp > 0:
-                frame_index_handkp -= 1
-                full_path = os.path.join(self.base_url, 'hand_keypoints', name.replace(".mp4", ""),
-                                         f'hand_kp_{frame_index_handkp:05d}.npy')
-
-            if os.path.isfile(full_path):
-                # Load the keypoints data
-                value = np.load(full_path)
-                handkp_frame = value
+            # Hand keypoints from HDF5
+            hand_kp_data = self._hand_kp_h5[video_id]['hand_kp']  # (T, 46, 2)
+            if frame_index < hand_kp_data.shape[0]:
+                handkp_frame = hand_kp_data[frame_index].copy()  # (46, 2)
             else:
-                # If no handflow data is found, initialize with zeros
                 handkp_frame = np.zeros((46, 2))
 
             # Apply transformations to handflow data
